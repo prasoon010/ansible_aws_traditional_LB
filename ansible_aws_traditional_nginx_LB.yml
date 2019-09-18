@@ -12,6 +12,7 @@
     private_subnet_2_cidr: 172.16.32.0/20
     image: ami-05c1fa8df71875112
     instance_type: t2.micro
+    domain: nginxlb.com
 
 
   tasks:
@@ -260,7 +261,7 @@
 
     - name: Adding backend1 server to inventory"
       add_host:
-        hostname: "{{ backend1 }}"
+        hostname: backend1
         ansible_host: "{{ backend1_ip }}"
         ansible_port: 22
         ansible_user: "ubuntu"
@@ -298,7 +299,7 @@
 
     - name: Adding backend2 server to inventory"
       add_host:
-        hostname: "{{ backend2 }}"
+        hostname: backend2
         ansible_host: "{{ backend2_ip }}"
         ansible_port: 22
         ansible_user: "ubuntu"
@@ -317,3 +318,57 @@
         - "{{ backend1_ip }}"
         - "{{ backend2_ip }}"
 
+    - name: "install nginx on frontend server"
+      delegate_to: frontend
+      become: yes
+      shell: apt-get update; apt-get install nginx
+
+
+    - name: 'Creating nginx virtual host'
+      delegate_to: frontend
+      become: yes
+      template:
+        src: nginx.j2
+        dest: /etc/nginx/conf.d/{{domain}}.conf
+
+    - name: "Nginx service restarting"
+      delegate_to: frontend
+      become: yes
+      service:
+        name: nginx
+        state: restarted
+        enabled: yes
+
+    - name: "Installing Apache in backend servers"
+      delegate_to: "{{ item }}"
+      become: yes
+      yum:
+        name:
+          - apache2
+          - php
+          - php-mysql
+        state: present
+      with_items:
+        - backend1
+        - backend2
+
+    - name: "Creating index.php"
+      delegate_to: "{{ item }}"
+      become: yes
+      copy:
+        content: "<h1><center><?php echo gethostname(); ?> </center></h1>"
+        dest: /var/www/html/index.php
+      with_items:
+        - backend1
+        - backend2
+
+    - name: "Restarting/Enabling Apache"
+      delegate_to: "{{ item }}"
+      become: yes
+      service:
+        name: apache2
+        state: restarted
+        enabled: yes
+      with_items:
+        - backend1
+        - backend2
