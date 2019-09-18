@@ -1,0 +1,319 @@
+---
+- name: "Playbook to create traditional nginx Load balancer infra"
+  hosts: localhost
+  connection: local
+  vars:
+    key_name: devops
+    region: "us-east-2"
+    vpc_name: "my_vpc"
+    vpc_cidr_block: 172.16.0.0/16
+    public_subnet_1_cidr: 172.16.0.0/20
+    private_subnet_1_cidr: 172.16.16.0/20
+    private_subnet_2_cidr: 172.16.32.0/20
+    image: ami-05c1fa8df71875112
+    instance_type: t2.micro
+
+
+  tasks:
+
+    - name: "Create new EC2 key"
+      ec2_key:
+        name: "{{ key_name }}"
+        region: "{{ region }}"
+      register: ec2_key_result
+
+    - name: "Save private key"
+      when: ec2_key_result.changed == true
+      copy:
+        content: "{{ ec2_key_result.key.private_key }}"
+        dest: "./{{ key_name }}.pem"
+        mode: 0600
+
+    - name: "Creating VPC"
+      ec2_vpc_net:
+        name: "{{ vpc_name }}"
+        cidr_block: "{{ vpc_cidr_block }}"
+        region: "{{ region }}"
+        state: present
+      register: vpc_result
+
+    - name: "Set vpc id in variable"
+      set_fact:
+        vpc_id: "{{ vpc_result.vpc.id }}"
+
+    - name: "Creating public subnet for frontend server [AZ-1]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ public_subnet_1_cidr }}"
+        az: "{{ region }}a"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "public_subnet_1"
+      register: public_subnet_az1
+
+    - name: "Set public subnet id in variable [AZ-1]"
+      set_fact:
+        public_subnet_az1_id: "{{ public_subnet_az1.subnet.id }}"
+
+    - name: "Creating private subnet for backend1 server [AZ-2]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ private_subnet_1_cidr }}"
+        az: "{{ region }}b"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "private_subnet_1"
+      register: private_subnet_az2
+
+    - name: "Set private subnet id in variable [AZ-2]"
+      set_fact:
+        private_subnet_az2_id: "{{ private_subnet_az2.subnet.id }}"
+
+    - name: "Creating private subnet for backend2 server [AZ-3]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ private_subnet_2_cidr }}"
+        az: "{{ region }}c"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "private_subnet_2"
+      register: private_subnet_az3
+
+    - name: "Set private subnet id in variable [AZ-3]"
+      set_fact:
+        private_subnet_az3_id: "{{ private_subnet_az3.subnet.id }}"
+
+
+    - name: "Creating security group for frontend server"
+      ec2_group:
+        name: "frontend_sg"
+        description: "frontend_sg"
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+              - 80
+              - 443
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+      register: frontend_sg
+
+    - name: "Set frontend security group id in variable"
+      set_fact:
+        frontend_sg_id: "{{ frontend_sg.group_id }}"
+
+
+    - name: "Creating security group for backend servers"
+      ec2_group:
+        name: "backend_sg"
+        description: "backend_sg"
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+              - 80
+              - 443
+            group_id: "{{ frontend_sg_id }}"
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+      register: backend_sg
+
+    - name: "Set backend security group id in variable"
+      set_fact:
+        webserver_sg_id: "{{ backend_sg.group_id }}"
+
+    - name: "Creating Internet gateway"
+      ec2_vpc_igw:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        state: present
+        tags:
+          Name: MY_IGW
+      register: igw_result
+
+    - name: "Set Internet gateway id in variable"
+      set_fact:
+        igw_id: "{{ igw_result.gateway_id }}"
+
+    - name: "Creating NAT gateway"
+      ec2_vpc_nat_gateway:
+        state: present
+        subnet_id: "{{ public_subnet_az1_id }}"
+        wait: yes
+        region: "{{ region }}"
+        if_exist_do_not_create: true
+      register: nat_gw_result
+
+    - name: "Set NAT gateway id in variable"
+      set_fact:
+        nat_gw_id: "{{ nat_gw_result.nat_gateway_id }}"
+
+    - name: "Creating public subnet RT with igw"
+      ec2_vpc_route_table:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        tags:
+          Name: public_RT
+        subnets:
+          - "{{ public_subnet_az1_id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw_id }}"
+      register: public_rt_result
+
+
+    - name: "Creating private subnet RT with NAT"
+      ec2_vpc_route_table:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        tags:
+          Name: private_RT
+        subnets:
+          - "{{ private_subnet_az2_id }}"
+          - "{{ private_subnet_az3_id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ nat_gw_id }}"
+      register: private_rt_result
+
+
+    - name: "Creating EC2 instance - Frontend server"
+      ec2:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        region: "{{ region }}"
+        zone: "{{ region }}a"
+        vpc_subnet_id: "{{ public_subnet_az1_id }}"
+        group: frontend_sg
+        assign_public_ip: yes
+        volumes:
+          - device_name: /dev/xvda
+            volume_type: gp2
+            volume_size: 8
+            delete_on_termination: true
+        wait: yes
+        count_tag:
+          Name: "frontend_server"
+        instance_tags:
+          Name: "frontend_server"
+        exact_count: 1
+      register: frontend_result
+
+    - name: "Set ec2 instance id in variable"
+      set_fact:
+        frontend_ec2_id: "{{ frontend_result.tagged_instances[0].id }}"
+        frontend_ip: "{{ frontend_result.tagged_instances[0].private_ip_address }}"
+
+    - name: Adding frontend server to inventory"
+      add_host:
+        hostname: "{{ frontend }}"
+        ansible_host: "{{ frontend_ip }}"
+        ansible_port: 22
+        ansible_user: "ubuntu"
+        ansible_ssh_private_key_file: "{{ key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+
+    - name: "Creating EC2 instance - Backend1 server"
+      ec2:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        region: "{{ region }}"
+        zone: "{{ region }}b"
+        vpc_subnet_id: "{{ private_subnet_az2_id }}"
+        group: backend_sg
+        assign_public_ip: no
+        volumes:
+          - device_name: /dev/xvda
+            volume_type: gp2
+            volume_size: 8
+            delete_on_termination: true
+        wait: yes
+        count_tag:
+          Name: "Backend1_server"
+        instance_tags:
+          Name: "Backend1_server"
+        exact_count: 1
+      register: backend1_result
+
+    - name: "Set ec2 instance id in variable"
+      set_fact:
+        backend1_id: "{{ backend1_result.tagged_instances[0].id }}"
+        backend1_ip: "{{ backend1_result.tagged_instances[0].private_ip_address }}"
+
+    - name: Adding backend1 server to inventory"
+      add_host:
+        hostname: "{{ backend1 }}"
+        ansible_host: "{{ backend1_ip }}"
+        ansible_port: 22
+        ansible_user: "ubuntu"
+        ansible_ssh_private_key_file: "{{ key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+
+    - name: "Creating EC2 instance - Backend2 server"
+      ec2:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        region: "{{ region }}"
+        zone: "{{ region }}c"
+        vpc_subnet_id: "{{ private_subnet_az3_id }}"
+        group: backend_sg
+        assign_public_ip: no
+        volumes:
+          - device_name: /dev/xvda
+            volume_type: gp2
+            volume_size: 8
+            delete_on_termination: true
+        wait: yes
+        count_tag:
+          Name: "Backend2_server"
+        instance_tags:
+          Name: "Backend2_server"
+        exact_count: 1
+      register: backend2_result
+
+    - name: "Set ec2 instance id in variable"
+      set_fact:
+        backend2_id: "{{ backend2_result.tagged_instances[0].id }}"
+        backend2_ip: "{{ backend2_result.tagged_instances[0].private_ip_address }}"
+
+    - name: Adding backend2 server to inventory"
+      add_host:
+        hostname: "{{ backend2 }}"
+        ansible_host: "{{ backend2_ip }}"
+        ansible_port: 22
+        ansible_user: "ubuntu"
+        ansible_ssh_private_key_file: "{{ key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+    - name: "Waiting for ssh port to open in all 3 servers"
+      wait_for:
+        port: 22
+        host: "{{ item }}"
+        timeout: 80
+        state: started
+        delay: 10
+      with_items:
+        - "{{ frontend_ip }}"
+        - "{{ backend1_ip }}"
+        - "{{ backend2_ip }}"
+
