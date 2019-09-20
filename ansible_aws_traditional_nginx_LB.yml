@@ -38,6 +38,9 @@
         state: present
       register: vpc_result
 
+    - wait_for:
+        timeout: 10
+
     - name: "Set vpc id in variable"
       set_fact:
         vpc_id: "{{ vpc_result.vpc.id }}"
@@ -136,7 +139,7 @@
 
     - name: "Set backend security group id in variable"
       set_fact:
-        webserver_sg_id: "{{ backend_sg.group_id }}"
+        backend_sg_id: "{{ backend_sg.group_id }}"
 
     - name: "Creating Internet gateway"
       ec2_vpc_igw:
@@ -207,7 +210,6 @@
           - device_name: /dev/xvda
             volume_type: gp2
             volume_size: 8
-            delete_on_termination: true
         wait: yes
         count_tag:
           Name: "frontend_server"
@@ -216,18 +218,19 @@
         exact_count: 1
       register: frontend_result
 
+
     - name: "Set ec2 instance id in variable"
       set_fact:
-        frontend_ec2_id: "{{ frontend_result.tagged_instances[0].id }}"
-        frontend_ip: "{{ frontend_result.tagged_instances[0].private_ip_address }}"
+        frontend_ip: "{{ frontend_result.tagged_instances[0].public_ip }}"
 
-    - name: Adding frontend server to inventory"
+    - name: "Adding frontend server to inventory"
       add_host:
-        hostname: "{{ frontend }}"
+        hostname: frontend
         ansible_host: "{{ frontend_ip }}"
         ansible_port: 22
         ansible_user: "ubuntu"
-        ansible_ssh_private_key_file: "{{ key_name }}"
+        ansible_python_interpreter: /usr/bin/python3
+        ansible_ssh_private_key_file: "{{ key_name }}.pem"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
 
 
@@ -245,28 +248,18 @@
           - device_name: /dev/xvda
             volume_type: gp2
             volume_size: 8
-            delete_on_termination: true
         wait: yes
         count_tag:
           Name: "Backend1_server"
         instance_tags:
           Name: "Backend1_server"
         exact_count: 1
+        user_data: "{{ lookup('file', 'backend_userdata') }}"
       register: backend1_result
 
     - name: "Set ec2 instance id in variable"
       set_fact:
-        backend1_id: "{{ backend1_result.tagged_instances[0].id }}"
-        backend1_ip: "{{ backend1_result.tagged_instances[0].private_ip_address }}"
-
-    - name: Adding backend1 server to inventory"
-      add_host:
-        hostname: backend1
-        ansible_host: "{{ backend1_ip }}"
-        ansible_port: 22
-        ansible_user: "ubuntu"
-        ansible_ssh_private_key_file: "{{ key_name }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        backend1_ip: "{{ backend1_result.tagged_instances[0].private_ip }}"
 
 
     - name: "Creating EC2 instance - Backend2 server"
@@ -283,45 +276,34 @@
           - device_name: /dev/xvda
             volume_type: gp2
             volume_size: 8
-            delete_on_termination: true
         wait: yes
         count_tag:
           Name: "Backend2_server"
         instance_tags:
           Name: "Backend2_server"
         exact_count: 1
+        user_data: "{{ lookup('file', 'backend_userdata') }}"
       register: backend2_result
+
 
     - name: "Set ec2 instance id in variable"
       set_fact:
-        backend2_id: "{{ backend2_result.tagged_instances[0].id }}"
-        backend2_ip: "{{ backend2_result.tagged_instances[0].private_ip_address }}"
+        backend2_ip: "{{ backend2_result.tagged_instances[0].private_ip }}"
 
-    - name: Adding backend2 server to inventory"
-      add_host:
-        hostname: backend2
-        ansible_host: "{{ backend2_ip }}"
-        ansible_port: 22
-        ansible_user: "ubuntu"
-        ansible_ssh_private_key_file: "{{ key_name }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
 
-    - name: "Waiting for ssh port to open in all 3 servers"
+    - name: "Waiting for ssh port to open in frontend servers"
       wait_for:
         port: 22
-        host: "{{ item }}"
-        timeout: 80
+        host: "{{ frontend_ip }}"
+        timeout: 120
         state: started
         delay: 10
-      with_items:
-        - "{{ frontend_ip }}"
-        - "{{ backend1_ip }}"
-        - "{{ backend2_ip }}"
+
 
     - name: "install nginx on frontend server"
       delegate_to: frontend
       become: yes
-      shell: apt-get update; apt-get install nginx
+      shell: apt-get update; apt install nginx -y
 
 
     - name: 'Creating nginx virtual host'
@@ -339,36 +321,3 @@
         state: restarted
         enabled: yes
 
-    - name: "Installing Apache in backend servers"
-      delegate_to: "{{ item }}"
-      become: yes
-      yum:
-        name:
-          - apache2
-          - php
-          - php-mysql
-        state: present
-      with_items:
-        - backend1
-        - backend2
-
-    - name: "Creating index.php"
-      delegate_to: "{{ item }}"
-      become: yes
-      copy:
-        content: "<h1><center><?php echo gethostname(); ?> </center></h1>"
-        dest: /var/www/html/index.php
-      with_items:
-        - backend1
-        - backend2
-
-    - name: "Restarting/Enabling Apache"
-      delegate_to: "{{ item }}"
-      become: yes
-      service:
-        name: apache2
-        state: restarted
-        enabled: yes
-      with_items:
-        - backend1
-        - backend2

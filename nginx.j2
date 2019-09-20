@@ -1,5 +1,4 @@
-http {
-   upstream backend {
+upstream backend {
       server {{ backend1_ip }};
       server {{ backend2_ip }};
 
@@ -8,9 +7,8 @@ http {
 
    server {
       listen 80;
-
+      server_name {{domain}} www.{{domain}};
       location / {
           proxy_pass http://backend;
       }
    }
-}
